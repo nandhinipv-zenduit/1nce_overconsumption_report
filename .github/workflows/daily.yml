@@ -1,0 +1,42 @@
+name: Daily SIM Usage Audit
+
+on:
+  schedule:
+    - cron: '0 14 * * *'   # 9 AM EST (UTC-5)
+  workflow_dispatch:
+
+jobs:
+  run-audit:
+    runs-on: ubuntu-latest
+
+    env:
+      GMAIL_USERNAME: ${{ secrets.GMAIL_USERNAME }}
+      GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
+
+      ONE_NCE_USERNAME: ${{ secrets.ONE_NCE_USERNAME }}
+      ONE_NCE_PASSWORD: ${{ secrets.ONE_NCE_PASSWORD }}
+
+      ZENDU_EMAIL: ${{ secrets.ZENDU_EMAIL }}
+      ZENDU_PASSWORD: ${{ secrets.ZENDU_PASSWORD }}
+
+      ZOHO_CLIENT_ID: ${{ secrets.ZOHO_CLIENT_ID }}
+      ZOHO_CLIENT_SECRET: ${{ secrets.ZOHO_CLIENT_SECRET }}
+      ZOHO_REFRESH_TOKEN: ${{ secrets.ZOHO_REFRESH_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run SIM Usage Audit
+        run: |
+          python main.py
