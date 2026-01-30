@@ -1,0 +1,6 @@
+requests
+aiohttp
+pandas
+tqdm
+aiolimiter
+xlsxwriter
