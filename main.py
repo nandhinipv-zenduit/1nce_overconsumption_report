@@ -8,7 +8,6 @@ from aiohttp import ClientTimeout, TCPConnector
 from aiolimiter import AsyncLimiter
 from asyncio import Semaphore
 from requests.auth import HTTPBasicAuth
-from zoho_auth import get_access_token
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
 import smtplib
@@ -61,6 +60,13 @@ zenduit_session = requests.Session()
 # ==========================================================
 # AUTH
 # ==========================================================
+
+zoho_crm = {
+    "client_id": os.environ.get("ZOHO_CLIENT_ID"),
+    "client_secret": os.environ.get("ZOHO_CLIENT_SECRET"),
+    "refresh_token": os.environ.get("ZOHO_REFRESH_TOKEN"),
+    "api_domain": "https://www.zohoapis.com/crm/v3"
+}
 def get_1nce_token():
     r = requests.post(
         f"{ONE_NCE['url']}/management-api/oauth/token",
@@ -70,6 +76,27 @@ def get_1nce_token():
     )
     r.raise_for_status()
     return r.json()["access_token"]
+
+def get_access_token():
+    r = requests.post(
+        "https://accounts.zoho.com/oauth/v2/token",
+        data={
+            "refresh_token": zoho_crm["refresh_token"],
+            "client_id": zoho_crm["client_id"],
+            "client_secret": zoho_crm["client_secret"],
+            "grant_type": "refresh_token"
+        },
+        timeout=30
+    )
+    data = r.json()
+
+    if r.status_code != 200 or "access_token" not in data:
+        raise RuntimeError(
+            f"Zoho OAuth failed | status={r.status_code} | response={data}"
+        )
+
+    return data["access_token"]
+
 
 def zenduit_auth():
     r = zenduit_session.post(
@@ -352,7 +379,7 @@ async def main():
     )
 
     print("🔹 Fetching Zoho subscriptions...")
-    zoho_token, _ = get_access_token("crm")
+    zoho_token = get_access_token()
     df_zoho = await fetch_zoho_subs(zoho_token)
     df_base = df_base.merge(df_zoho, on="Device_Serial", how="left")
     print(f"✅ Zoho subscriptions fetched: {len(df_zoho)}")
