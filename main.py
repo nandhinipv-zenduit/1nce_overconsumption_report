@@ -21,8 +21,8 @@ from io import BytesIO
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
-EMAIL_SENDER = os.getenv("gmail_username")
-EMAIL_PASSWORD = os.getenv("gmail_pass")
+EMAIL_SENDER = os.getenv("GMAIL_USERNAME")
+EMAIL_PASSWORD = os.getenv("GMAIL_PASS")
 
 EMAIL_TO = [
     "nandhinipv@zenduit.com", "abidali@gofleet.com","adrianarosas@zenduit.com"
@@ -37,8 +37,8 @@ if not EMAIL_SENDER or not EMAIL_PASSWORD:
 # ==========================================================
 ONE_NCE = {
     "url": "https://api.1nce.com",
-    "username": os.getenv("username"),
-    "password": os.getenv("password")
+    "username": os.getenv("ONE_NCE_USERNAME"),
+    "password": os.getenv("ONE_NCE_PASSWORD")
 }
 
 BASE_ZENDUIT = "https://trax-admin-service.zenduit.com"
