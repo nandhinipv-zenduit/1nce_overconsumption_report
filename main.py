@@ -25,7 +25,7 @@ EMAIL_SENDER = os.getenv("GMAIL_USERNAME")
 EMAIL_PASSWORD = os.getenv("GMAIL_PASS")
 
 EMAIL_TO = [
-    "nandhinipv@zenduit.com", "abidali@gofleet.com","adrianarosas@zenduit.com","vanibukelia@zenduit.com","rizamae@gofleet.com","nikithavinod@zenduit.com"
+    "nandhinipv@zenduit.com"
 ]
 
 if not EMAIL_SENDER or not EMAIL_PASSWORD:
@@ -37,8 +37,8 @@ if not EMAIL_SENDER or not EMAIL_PASSWORD:
 # ==========================================================
 ONE_NCE = {
     "url": "https://api.1nce.com",
-    "username": os.getenv("ONE_NCE_USERNAME"),
-    "password": os.getenv("ONE_NCE_PASSWORD")
+    "username": os.getenv("username"),
+    "password": os.getenv("password")
 }
 
 BASE_ZENDUIT = "https://trax-admin-service.zenduit.com"
@@ -137,10 +137,13 @@ def fetch_all_sims(token):
             break
 
         page += 1
+        
 
     df = pd.DataFrame(rows)
-    df["ICCID"] = df["iccid"].astype(str).str.strip()
-    return df[["ICCID"]]
+    df["iccid"] = df["iccid"].where(df["iccid"].notna(), None)
+    df["iccid"] = df["iccid"].astype(str).str.strip()
+    df.loc[df["iccid"].isin(["None", "nan", ""]), "iccid"] = None
+    return df[["iccid"]].rename(columns={"iccid": "ICCID"})
 
 # ==========================================================
 # 1NCE USAGE (T31–T1)
@@ -191,27 +194,65 @@ async def fetch_all_usage(token, iccids, start_dt, end_dt):
 # ZENDUIT
 # ==========================================================
 def fetch_zenduit_devices():
-    r = zenduit_session.post(f"{BASE_ZENDUIT}/Device/GetAll", json={}, timeout=60)
+    print("Fetching Zenduit devices...")
+
+    # ---- Get devices ----
+    r = zenduit_session.post(
+        f"{BASE_ZENDUIT}/Device/GetAll",
+        json={},
+        timeout=120
+    )
     r.raise_for_status()
 
     df = pd.json_normalize(r.json())
+
     df = df.rename(columns={
         "ICCID": "ICCID",
         "Serial": "Device_Serial",
-        "DataPlan": "Zenduit_Data_Plan"
+        "DataPlan": "Zenduit_Data_Plan",
+        "CompanyId": "CompanyId"
     })
 
     df["ICCID"] = df["ICCID"].astype(str).str.strip()
     df["Device_Serial"] = df["Device_Serial"].astype(str).str.strip()
-    df["Zenduit_Data_Plan"] = pd.to_numeric(df["Zenduit_Data_Plan"], errors="coerce").fillna(0)
+    df["Zenduit_Data_Plan"] = pd.to_numeric(
+        df["Zenduit_Data_Plan"],
+        errors="coerce"
+    ).fillna(0)
 
-    # ✅ Deduplicate here with progress
+    # ---- Fetch companies in SAME function ----
+    print("Fetching companies...")
+    r_comp = zenduit_session.post(
+        f"{BASE_ZENDUIT}/Company/GetAll",
+        json={},
+        timeout=60
+    )
+    r_comp.raise_for_status()
+
+    df_companies = pd.json_normalize(r_comp.json())
+    df_companies = df_companies[["Id", "Name"]].rename(
+        columns={
+            "Id": "CompanyId",
+            "Name": "CompanyName"
+        }
+    )
+
+    # ---- Map company name ----
+    df = df.merge(df_companies, on="CompanyId", how="left")
+
+    # ---- Deduplicate by ICCID ----
     df = (
         df.sort_values("Zenduit_Data_Plan", ascending=False)
           .drop_duplicates(subset=["ICCID"], keep="first")
     )
 
-    return df[["ICCID", "Device_Serial", "Zenduit_Data_Plan"]]
+    return df[[
+        "ICCID",
+        "Device_Serial",
+        "Zenduit_Data_Plan",
+        "CompanyName"
+    ]]
+
 
 def fetch_zenduit_usage(start_dt, end_dt, retries=3, timeout=180):
     payload = {
@@ -383,6 +424,8 @@ async def main():
     df_zoho = await fetch_zoho_subs(zoho_token)
     df_base = df_base.merge(df_zoho, on="Device_Serial", how="left")
     print(f"✅ Zoho subscriptions fetched: {len(df_zoho)}")
+    df_base["1NCE_MB_T31_T1"] = df_base["1NCE_MB_T31_T1"].fillna(0)
+    df_base["Zenduit_Data_Plan"] = df_base["Zenduit_Data_Plan"].fillna(0)
 
     df_base["Consumption"] = ""
     df_base.loc[
@@ -393,19 +436,18 @@ async def main():
     # ======================================================
     # 🔹 ADDED LOGIC (NO EXISTING CODE CHANGED)
     # ======================================================
-    df_no_customer_in_zenduone = df_base[
-        df_base["ICCID"].notna() & (
-            df_base["Device_Serial"].isna() |
-            (df_base["Device_Serial"].astype(str).str.strip() == "")
-        )
-    ]
+    device_iccids = set(df_z_devices["ICCID"].dropna().astype(str).str.strip())
 
+    df_no_customer_in_zenduone = df_base[
+        df_base["ICCID"].notna() &
+        ~df_base["ICCID"].astype(str).str.strip().isin(device_iccids)
+        ]
     df_base["account_key"] = df_base["account_id"].fillna(
         "UNMAPPED_" + df_base["ICCID"]
     )
 
     df_account_summary = (
-        df_base[df_base["account_id"].notna()]  # ✅ KEEP ONLY MAPPED ACCOUNTS
+        df_base[df_base["account_id"].notna()]
         .groupby(["account_id", "account_name"], dropna=False)
         .agg(
             iccid_count=("ICCID", "nunique"),
