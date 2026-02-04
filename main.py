@@ -25,7 +25,7 @@ EMAIL_SENDER = os.getenv("GMAIL_USERNAME")
 EMAIL_PASSWORD = os.getenv("GMAIL_PASS")
 
 EMAIL_TO = [
-    "nandhinipv@zenduit.com"
+    "nandhinipv@zenduit.com","nikithavinod@zenduit.com","abidali@gofleet.com","adrianarosas@zenduit.com","vanibukelia@zenduit.com","rizamae@gofleet.com"
 ]
 
 if not EMAIL_SENDER or not EMAIL_PASSWORD:
