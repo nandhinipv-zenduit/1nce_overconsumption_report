@@ -396,6 +396,7 @@ async def main():
     df_usage = await fetch_all_usage(nce_token, df_base["ICCID"].tolist(), start_dt, end_dt)
     df_base = df_base.merge(df_usage, on="ICCID", how="left")
 
+
     print("🔹 Authenticating Zenduit...")
     zenduit_auth()
 
@@ -418,6 +419,7 @@ async def main():
         .merge(df_z_devices, on="ICCID", how="left")
         .merge(df_z_usage, on="ICCID", how="left")
     )
+    df_base["Zenduit_Usage_MB"] = df_base["Zenduit_Usage_MB"].fillna(0)
 
     print("🔹 Fetching Zoho subscriptions...")
     zoho_token = get_access_token()
