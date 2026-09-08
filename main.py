@@ -10,28 +10,25 @@ from asyncio import Semaphore
 from requests.auth import HTTPBasicAuth
 from tqdm import tqdm
 from tqdm.asyncio import tqdm_asyncio
-import smtplib
+import base64
 from email.message import EmailMessage
 from io import BytesIO
-
-
 # ==========================================================
-# GMAIL CONFIG (GLOBAL)
+# GMAIL CONFIG (GLOBAL) — Gmail API + OAuth2 refresh token
+# (same pattern as the Zoho auth below; no app password needed)
 # ==========================================================
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-
-EMAIL_SENDER = os.getenv("GMAIL_USERNAME")
-EMAIL_PASSWORD = os.getenv("GMAIL_PASS")
-
+GMAIL_CLIENT_ID = os.getenv("GMAIL_CLIENT_ID")
+GMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET")
+GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN")
+EMAIL_SENDER = os.getenv("GMAIL_USERNAME")  # the mailbox that granted consent
 EMAIL_TO = [
     "nandhinipv@zenduit.com","nikithavinod@zenduit.com","abidali@gofleet.com","vanibukelia@zenduit.com","rizamae@gofleet.com"
 ]
-
-if not EMAIL_SENDER or not EMAIL_PASSWORD:
-    raise RuntimeError("❌ Gmail credentials not found in environment variables")
-
-
+if not all([GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN, EMAIL_SENDER]):
+    raise RuntimeError(
+        "❌ Gmail OAuth2 credentials not found in environment variables "
+        "(need GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN, GMAIL_USERNAME)"
+    )
 # ==========================================================
 # CONFIG
 # ==========================================================
@@ -40,27 +37,20 @@ ONE_NCE = {
     "username": os.getenv("ONE_NCE_USERNAME"),
     "password": os.getenv("ONE_NCE_PASSWORD")
 }
-
 BASE_ZENDUIT = "https://trax-admin-service.zenduit.com"
 ZENDU_EMAIL = os.getenv("ZENDU_EMAIL")
 ZENDU_PASSWORD = os.getenv("ZENDU_PASSWORD")
-
 ZOHO_BASE_URL = "https://www.zohoapis.com/crm/v2"
 ZOHO_MODULE = "Subscriptions"
-
 PAGE_SIZE = 100
 MAX_RPS = 15
 CONCURRENT_REQUESTS = 15
 LIST_CONCURRENCY = 6
-
 OUTPUT_EXCEL = r"C:\Users\suppo\PyCharmMiscProject\.venv\Billing_audit_engine\OP\final_overconsumption_report.xlsx"
-
 zenduit_session = requests.Session()
-
 # ==========================================================
 # AUTH
 # ==========================================================
-
 zoho_crm = {
     "client_id": os.environ.get("ZOHO_CLIENT_ID"),
     "client_secret": os.environ.get("ZOHO_CLIENT_SECRET"),
@@ -76,7 +66,6 @@ def get_1nce_token():
     )
     r.raise_for_status()
     return r.json()["access_token"]
-
 def get_access_token():
     r = requests.post(
         "https://accounts.zoho.com/oauth/v2/token",
@@ -89,15 +78,29 @@ def get_access_token():
         timeout=30
     )
     data = r.json()
-
     if r.status_code != 200 or "access_token" not in data:
         raise RuntimeError(
             f"Zoho OAuth failed | status={r.status_code} | response={data}"
         )
-
     return data["access_token"]
-
-
+def get_gmail_access_token():
+    """Exchange the long-lived refresh token for a short-lived Gmail access token."""
+    r = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": GMAIL_CLIENT_ID,
+            "client_secret": GMAIL_CLIENT_SECRET,
+            "refresh_token": GMAIL_REFRESH_TOKEN,
+            "grant_type": "refresh_token"
+        },
+        timeout=30
+    )
+    data = r.json()
+    if r.status_code != 200 or "access_token" not in data:
+        raise RuntimeError(
+            f"Gmail OAuth failed | status={r.status_code} | response={data}"
+        )
+    return data["access_token"]
 def zenduit_auth():
     r = zenduit_session.post(
         f"{BASE_ZENDUIT}/Auth/Authenticate",
@@ -105,12 +108,10 @@ def zenduit_auth():
         timeout=30
     )
     r.raise_for_status()
-
     zenduit_session.headers.update({
         "Authorization": f"Bearer {r.json()['Token']}",
         "Content-Type": "application/json"
     })
-
 # ==========================================================
 # 1NCE SIM INVENTORY (BASE)
 # ==========================================================
@@ -118,7 +119,6 @@ def fetch_all_sims(token):
     headers = {"Authorization": f"Bearer {token}"}
     page = 1
     rows = []
-
     while True:
         r = requests.get(
             f"{ONE_NCE['url']}/management-api/v1/sims",
@@ -128,23 +128,18 @@ def fetch_all_sims(token):
         )
         r.raise_for_status()
         batch = r.json()
-
         if not batch:
             break
-
         rows.extend(batch)
         if len(batch) < PAGE_SIZE:
             break
-
         page += 1
-        
 
     df = pd.DataFrame(rows)
     df["iccid"] = df["iccid"].where(df["iccid"].notna(), None)
     df["iccid"] = df["iccid"].astype(str).str.strip()
     df.loc[df["iccid"].isin(["None", "nan", ""]), "iccid"] = None
     return df[["iccid"]].rename(columns={"iccid": "ICCID"})
-
 # ==========================================================
 # 1NCE USAGE (T31–T1)
 # ==========================================================
@@ -155,47 +150,37 @@ async def fetch_usage(session, limiter, sem, token, iccid, start_dt, end_dt):
         "start_dt": start_dt.strftime("%Y-%m-%dT00:00:00Z"),
         "end_dt": end_dt.strftime("%Y-%m-%dT23:59:59Z")
     }
-
     total = 0.0
-
     async with limiter, sem:
         async with session.get(url, headers=headers, params=params) as r:
             if r.status != 200:
                 return {"ICCID": iccid, "1NCE_MB_T31_T1": 0}
-
             payload = await r.json()
             for s in payload.get("stats", []):
                 if s.get("date") == "TOTAL":
                     continue
                 total += float(s.get("data", {}).get("volume", 0))
-
     return {"ICCID": iccid, "1NCE_MB_T31_T1": round(total, 2)}
-
 async def fetch_all_usage(token, iccids, start_dt, end_dt):
     timeout = ClientTimeout(sock_connect=20, sock_read=60)
     connector = TCPConnector(limit=CONCURRENT_REQUESTS)
     limiter = AsyncLimiter(MAX_RPS, 1)
     sem = Semaphore(CONCURRENT_REQUESTS)
-
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
         tasks = [
             fetch_usage(session, limiter, sem, token, iccid, start_dt, end_dt)
             for iccid in iccids
         ]
-
         # ✅ Async progress bar for 1NCE usage
         results = []
         for f in tqdm_asyncio.as_completed(tasks, total=len(tasks), desc="Fetching 1NCE usage"):
             results.append(await f)
-
         return pd.DataFrame(results)
-
 # ==========================================================
 # ZENDUIT
 # ==========================================================
 def fetch_zenduit_devices():
     print("Fetching Zenduit devices...")
-
     # ---- Get devices ----
     r = zenduit_session.post(
         f"{BASE_ZENDUIT}/Device/GetAll",
@@ -203,23 +188,19 @@ def fetch_zenduit_devices():
         timeout=120
     )
     r.raise_for_status()
-
     df = pd.json_normalize(r.json())
-
     df = df.rename(columns={
         "ICCID": "ICCID",
         "Serial": "Device_Serial",
         "DataPlan": "Zenduit_Data_Plan",
         "CompanyId": "CompanyId"
     })
-
     df["ICCID"] = df["ICCID"].astype(str).str.strip()
     df["Device_Serial"] = df["Device_Serial"].astype(str).str.strip()
     df["Zenduit_Data_Plan"] = pd.to_numeric(
         df["Zenduit_Data_Plan"],
         errors="coerce"
     ).fillna(0)
-
     # ---- Fetch companies in SAME function ----
     print("Fetching companies...")
     r_comp = zenduit_session.post(
@@ -228,7 +209,6 @@ def fetch_zenduit_devices():
         timeout=60
     )
     r_comp.raise_for_status()
-
     df_companies = pd.json_normalize(r_comp.json())
     df_companies = df_companies[["Id", "Name"]].rename(
         columns={
@@ -236,30 +216,24 @@ def fetch_zenduit_devices():
             "Name": "CompanyName"
         }
     )
-
     # ---- Map company name ----
     df = df.merge(df_companies, on="CompanyId", how="left")
-
     # ---- Deduplicate by ICCID ----
     df = (
         df.sort_values("Zenduit_Data_Plan", ascending=False)
           .drop_duplicates(subset=["ICCID"], keep="first")
     )
-
     return df[[
         "ICCID",
         "Device_Serial",
         "Zenduit_Data_Plan",
         "CompanyName"
     ]]
-
-
 def fetch_zenduit_usage(start_dt, end_dt, retries=3, timeout=180):
     payload = {
         "DateFrom": f"{start_dt}T00:00:00Z",
         "DateTo": f"{end_dt}T23:59:59Z"
     }
-
     for attempt in range(1, retries + 1):
         try:
             print(f"Fetching Zenduit usage (attempt {attempt})...")
@@ -269,7 +243,6 @@ def fetch_zenduit_usage(start_dt, end_dt, retries=3, timeout=180):
                 timeout=timeout
             )
             r.raise_for_status()
-
             df = pd.DataFrame([
                 {
                     "ICCID": str(d.get("ICCID")).strip(),
@@ -280,27 +253,22 @@ def fetch_zenduit_usage(start_dt, end_dt, retries=3, timeout=180):
             ])
             print(f"✅ Zenduit usage fetched: {len(df)} records")
             return df
-
         except requests.exceptions.ReadTimeout:
             print(f"⏳ Zenduit usage timeout (attempt {attempt}/{retries})")
             if attempt == retries:
                 print("⚠️ Zenduit usage failed after retries — returning empty DataFrame")
                 return pd.DataFrame(columns=["ICCID", "Zenduit_Usage_MB", "Zenduit_BillingStatus"])
-
         except Exception as e:
             print(f"❌ Zenduit usage error: {e}")
             return pd.DataFrame(columns=["ICCID", "Zenduit_Usage_MB", "Zenduit_BillingStatus"])
-
 # ==========================================================
 # ZOHO
 # ==========================================================
 def lookup_name(v): return v.get("name") if isinstance(v, dict) else None
 def lookup_id(v): return v.get("id") if isinstance(v, dict) else None
-
 async def fetch_zoho_subs(token):
     page = 1
     rows = []
-
     async with aiohttp.ClientSession() as session:
         while True:
             tasks = [
@@ -311,99 +279,87 @@ async def fetch_zoho_subs(token):
                 )
                 for p in range(page, page + LIST_CONCURRENCY)
             ]
-
             responses = await asyncio.gather(*tasks)
             stop = False
-
             for r in tqdm(responses, desc=f"Fetching Zoho subs (page {page})"):
                 if r.status != 200:
                     stop = True
                     break
-
                 data = (await r.json()).get("data", [])
                 if not data:
                     stop = True
                     break
-
                 for s in data:
                     if (s.get("Status") or "").lower() != "active":
                         continue
-
                     rows.append({
                         "Device_Serial": str(s.get("Device_Serial")).strip(),
                         "account_id": lookup_id(s.get("Customer_Account")),
                         "account_name": lookup_name(s.get("Customer_Account"))
                     })
-
                 if len(data) < PAGE_SIZE:
                     stop = True
-
-
             if stop:
                 break
             page += LIST_CONCURRENCY
-
     return pd.DataFrame(rows)
-
 def send_email(overconsumption_count, unmapped_count, excel_buffer):
     msg = EmailMessage()
     msg["Subject"] = "Monthly SIM Usage Audit – Overconsumption Report"
     msg["From"] = EMAIL_SENDER
     msg["To"] = ", ".join(EMAIL_TO)
-
     msg.set_content(f"""
 Hello Team,
-
 Please find the monthly SIM usage audit report attached.
-
 Summary:
 - Overconsumption SIMs: {overconsumption_count}
 - ICCIDs without active customer in ZenduOne: {unmapped_count}
-
 Regards,
 Nandhiv
 """)
-
     msg.add_attachment(
         excel_buffer.read(),
         maintype="application",
         subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         filename="final_overconsumption_report.xlsx"
     )
-
-    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-        server.starttls()
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.send_message(msg)
-
-    print("📧 Email sent (Excel attached from memory)")
+    # Gmail API: the whole RFC 2822 message goes in the body, base64url-encoded
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
+    access_token = get_gmail_access_token()
+    r = requests.post(
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        },
+        json={"raw": raw},
+        timeout=120
+    )
+    if r.status_code != 200:
+        raise RuntimeError(
+            f"Gmail send failed | status={r.status_code} | response={r.text}"
+        )
+    print(f"📧 Email sent via Gmail API (message id: {r.json().get('id')})")
 # ==========================================================
 # MAIN
 # ==========================================================
 async def main():
     print("🔹 Getting 1NCE token...")
     nce_token = get_1nce_token()
-
     print("🔹 Fetching all SIMs...")
     df_base = fetch_all_sims(nce_token)
     print(f"✅ Total SIMs fetched: {len(df_base)}")
-
     today = datetime.utcnow().date()
     start_dt = today - timedelta(days=31)
     end_dt = today - timedelta(days=1)
-
     print("🔹 Fetching 1NCE usage for all SIMs...")
     df_usage = await fetch_all_usage(nce_token, df_base["ICCID"].tolist(), start_dt, end_dt)
     df_base = df_base.merge(df_usage, on="ICCID", how="left")
-
-
     print("🔹 Authenticating Zenduit...")
     zenduit_auth()
-
     print("🔹 Fetching Zenduit devices...")
     df_z_devices = fetch_zenduit_devices()
     print(f"✅ Zenduit devices fetched: {len(df_z_devices)}")
-
     print("🔹 Fetching Zenduit usage...")
     df_z_usage = fetch_zenduit_usage(start_dt, end_dt)
     df_z_usage = (
@@ -420,7 +376,6 @@ async def main():
         .merge(df_z_usage, on="ICCID", how="left")
     )
     df_base["Zenduit_Usage_MB"] = df_base["Zenduit_Usage_MB"].fillna(0)
-
     print("🔹 Fetching Zoho subscriptions...")
     zoho_token = get_access_token()
     df_zoho = await fetch_zoho_subs(zoho_token)
@@ -428,18 +383,15 @@ async def main():
     print(f"✅ Zoho subscriptions fetched: {len(df_zoho)}")
     df_base["1NCE_MB_T31_T1"] = df_base["1NCE_MB_T31_T1"].fillna(0)
     df_base["Zenduit_Data_Plan"] = df_base["Zenduit_Data_Plan"].fillna(0)
-
     df_base["Consumption"] = ""
     df_base.loc[
         df_base["1NCE_MB_T31_T1"] > df_base["Zenduit_Data_Plan"],
         "Consumption"
     ] = "Overconsumption"
-
     # ======================================================
     # 🔹 ADDED LOGIC (NO EXISTING CODE CHANGED)
     # ======================================================
     device_iccids = set(df_z_devices["ICCID"].dropna().astype(str).str.strip())
-
     df_no_customer_in_zenduone = df_base[
         df_base["ICCID"].notna() &
         ~df_base["ICCID"].astype(str).str.strip().isin(device_iccids)
@@ -447,7 +399,6 @@ async def main():
     df_base["account_key"] = df_base["account_id"].fillna(
         "UNMAPPED_" + df_base["ICCID"]
     )
-
     df_account_summary = (
         df_base[df_base["account_id"].notna()]
         .groupby(["account_id", "account_name"], dropna=False)
@@ -458,40 +409,29 @@ async def main():
         )
         .reset_index()
     )
-
     print("🔹 Writing Excel file...")
     excel_buffer = BytesIO()
-
     with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
         df_base.to_excel(writer, sheet_name="base_combined", index=False)
         df_no_customer_in_zenduone.to_excel(writer, sheet_name="no_customer_in_zenduone", index=False)
         df_account_summary.to_excel(writer, sheet_name="account_usage_summary", index=False)
-
     excel_buffer.seek(0)
-
     print("✅ DONE → Excel generated")
-
-
     # ======================================================
     # 🔹 SUMMARY COUNTS
     # ======================================================
     overconsumption_count = df_base[
         df_base["Consumption"] == "Overconsumption"
         ].shape[0]
-
     unmapped_iccid_count = df_no_customer_in_zenduone.shape[0]
-
     print(f"📊 Overconsumption count: {overconsumption_count}")
     print(f"📊 ICCIDs without active customer: {unmapped_iccid_count}")
-
     print("🔹 Sending email...")
     send_email(
         overconsumption_count=overconsumption_count,
         unmapped_count=unmapped_iccid_count,
         excel_buffer=excel_buffer
     )
-
-
 # ==========================================================
 if __name__ == "__main__":
     asyncio.run(main())
