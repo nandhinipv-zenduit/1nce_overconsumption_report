@@ -23,7 +23,7 @@ GMAIL_CLIENT_SECRET = os.getenv("GMAIL_CLIENT_SECRET")
 GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN")
 EMAIL_SENDER = os.getenv("GMAIL_USERNAME")  # the mailbox that granted consent
 EMAIL_TO = [
-    "nandhinipv@zenduit.com","nikithavinod@zenduit.com","abidali@gofleet.com","vanibukelia@zenduit.com","rizamae@gofleet.com"
+    "nandhinipv@zenduit.com","nikithavinod@zenduit.com","abidali@gofleet.com","yaseenshafiq@gofleet.com","rizamae@gofleet.com","amaansardar@zenduit.com"
 ]
 if not all([GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, GMAIL_REFRESH_TOKEN, EMAIL_SENDER]):
     raise RuntimeError(
