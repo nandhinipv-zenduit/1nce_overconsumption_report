@@ -283,9 +283,17 @@ async def fetch_zoho_subs(token):
             stop = False
             for r in tqdm(responses, desc=f"Fetching Zoho subs (page {page})"):
                 if r.status != 200:
+                    # Don't swallow real API errors (401/429/5xx) as "end of pagination" —
+                    # log what actually happened so failures are diagnosable.
+                    body = await r.text()
+                    print(
+                        f"⚠️ Zoho subs fetch failed | status={r.status} | "
+                        f"page={page} | body={body[:500]}"
+                    )
                     stop = True
                     break
-                data = (await r.json()).get("data", [])
+                payload = await r.json()
+                data = payload.get("data", [])
                 if not data:
                     stop = True
                     break
@@ -302,7 +310,11 @@ async def fetch_zoho_subs(token):
             if stop:
                 break
             page += LIST_CONCURRENCY
-    return pd.DataFrame(rows)
+    # Always return the expected columns, even with zero rows, so the later
+    # merge on "Device_Serial" never KeyErrors if Zoho returned nothing.
+    if not rows:
+        print("⚠️ Zoho subs: no rows fetched — check the error above (if any) or Zoho auth/rate limits")
+    return pd.DataFrame(rows, columns=["Device_Serial", "account_id", "account_name"])
 def send_email(overconsumption_count, unmapped_count, excel_buffer):
     msg = EmailMessage()
     msg["Subject"] = "Monthly SIM Usage Audit – Overconsumption Report"
