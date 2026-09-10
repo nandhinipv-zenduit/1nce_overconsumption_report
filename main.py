@@ -1,4 +1,5 @@
 import os
+import time
 import asyncio
 import aiohttp
 import requests
@@ -179,15 +180,38 @@ async def fetch_all_usage(token, iccids, start_dt, end_dt):
 # ==========================================================
 # ZENDUIT
 # ==========================================================
+def _zenduit_post_with_retry(path, timeout, retries=4, backoff=15):
+    """POST to a Zenduit admin-service endpoint, retrying on transient
+    server-side failures (502/503/504 and connection/timeout errors).
+    Zenduit's backend occasionally bad-gateways for a few seconds — a plain
+    request.raise_for_status() would kill the whole 18-minute run for that."""
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            r = zenduit_session.post(f"{BASE_ZENDUIT}{path}", json={}, timeout=timeout)
+            if r.status_code in (502, 503, 504):
+                print(
+                    f"⏳ Zenduit {path} returned {r.status_code} "
+                    f"(attempt {attempt}/{retries}) — retrying in {backoff}s..."
+                )
+                last_exc = requests.exceptions.HTTPError(
+                    f"{r.status_code} from {path}", response=r
+                )
+                if attempt < retries:
+                    time.sleep(backoff)
+                continue
+            r.raise_for_status()
+            return r
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+            print(f"⏳ Zenduit {path} connection error (attempt {attempt}/{retries}): {e}")
+            last_exc = e
+            if attempt < retries:
+                time.sleep(backoff)
+    raise RuntimeError(f"Zenduit {path} failed after {retries} attempts") from last_exc
 def fetch_zenduit_devices():
     print("Fetching Zenduit devices...")
     # ---- Get devices ----
-    r = zenduit_session.post(
-        f"{BASE_ZENDUIT}/Device/GetAll",
-        json={},
-        timeout=120
-    )
-    r.raise_for_status()
+    r = _zenduit_post_with_retry("/Device/GetAll", timeout=120)
     df = pd.json_normalize(r.json())
     df = df.rename(columns={
         "ICCID": "ICCID",
@@ -203,12 +227,7 @@ def fetch_zenduit_devices():
     ).fillna(0)
     # ---- Fetch companies in SAME function ----
     print("Fetching companies...")
-    r_comp = zenduit_session.post(
-        f"{BASE_ZENDUIT}/Company/GetAll",
-        json={},
-        timeout=60
-    )
-    r_comp.raise_for_status()
+    r_comp = _zenduit_post_with_retry("/Company/GetAll", timeout=60)
     df_companies = pd.json_normalize(r_comp.json())
     df_companies = df_companies[["Id", "Name"]].rename(
         columns={
